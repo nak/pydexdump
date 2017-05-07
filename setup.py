@@ -1,7 +1,7 @@
 from distutils.core import setup
 
 setup(
-        name='dedex',
+        name='pydexdump',
         version='1.0.0',
         packages=['dexdump'],
         url='',
@@ -9,5 +9,5 @@ setup(
         author='jrusnak',
         author_email='',
         description='dex parsing tool to find test annotations',
-        scripts=['dexdump/dedex']
+        scripts=['dexdump/pydexdump']
 )

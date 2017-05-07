@@ -1,5 +1,0 @@
-#!/bin/env python3
-from dexdump import parsing
-
-if __name__ == "__main__":
-    parsing.main()
