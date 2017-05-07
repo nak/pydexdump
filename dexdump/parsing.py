@@ -3,7 +3,7 @@ import shutil
 import sys
 import tempfile
 import zipfile
-from abc import ABCMeta, abstractmethod
+from abc import ABCMeta
 
 try:
     from functools import lru_cache
@@ -15,35 +15,11 @@ except ImportError:
 from dexdump import junit3
 from . import ByteStream
 
-class LazyList(object):
-
-    def __init__(self, clazz, bytestream, size):
-        self._elements = [None for _ in range(size)]
-        if not hasattr(clazz, "_size") and size:
-            pos = bytestream.tell()
-            self._elements[0] = clazz(bytestream)
-            clazz._size = bytestream.tell() - pos
-        self._bytestream = bytestream
-        self._start = bytestream.tell()
-        self._clazz = clazz
-        bytestream.seek(bytestream.tell() + (size-1)*clazz._size)
-
-    def __getitem__(self, item):
-        if self._elements[item] is None:
-            self._bytestream.seek(self._start + item * self._clazz._size)
-            self._elements[item] = self._clazz(self._bytestream)
-        return self._elements[item]
-
-
-class DexFormatException(Exception):
-    """
-    General exception thrown on dex format inconsistency
-    """
-    def __init__(self, msg):
-        super(DexFormatException, self).__init__(msg)
-
 
 class DexParser(object):
+
+    class FormatException(Exception):
+        pass
 
     class DexMagic(object):
         """
@@ -52,8 +28,8 @@ class DexParser(object):
         SIZE_MAGIC_DEX = 3
         SIZE_MAGIC_VERSION = 3
 
-        EXPECTED_DEX = 'dex'  # bytes([0x64, 0x65, 0x78])
-        EXPECTED_VERSION = '035'  # bytes([0x30, 0x33, 0x35])
+        EXPECTED_DEX = bytes([0x64, 0x65, 0x78])
+        EXPECTED_VERSION = bytes([0x30, 0x33, 0x35])
 
         def __init__(self, bytestream):
             self._dex = bytestream.read_bytes(DexParser.DexMagic.SIZE_MAGIC_DEX)
@@ -86,7 +62,8 @@ class DexParser(object):
             self._map_offset = bytestream.read_ints(6)
             self._size_and_offset = {}
             for clazz in [DexParser.StringIdItem, DexParser.TypeIdItem, DexParser.ProtoIdItem,
-                          DexParser.FieldIdItem, DexParser.MethodIdItem, DexParser.ClassDefItem, DexParser.ClassDefData]:
+                          DexParser.FieldIdItem, DexParser.MethodIdItem, DexParser.ClassDefItem,
+                          DexParser.ClassDefData]:
                 # define for each data class the size and offset of where that class's data is stored
                 size, offset = bytestream.read_ints(2)
                 self._size_and_offset[clazz] = (size, offset)
@@ -99,9 +76,9 @@ class DexParser(object):
             :raises: `DexFormatException` if data read from dex file fails validation checks
             """
             if not self._magic.validate():
-                raise DexFormatException("Invalid dex magic in dex file")
+                raise DexParser.FormatException("Invalid dex magic in dex file")
             if self._endian_tag != DexParser.Header.EXPECTED_ENDIAN_TAG:
-                raise DexFormatException("Invalid endian-ness/tag in dex file")
+                raise DexParser.FormatException("Invalid endian-ness/tag in dex file")
 
     ###############################
     # Various data classes for holding dex-item data
@@ -112,6 +89,8 @@ class DexParser(object):
         """
         base class for all data items
         """
+        FORMAT = "*"
+
         __metaclass__ = ABCMeta
         _count = 0
 
@@ -119,192 +98,203 @@ class DexParser(object):
             self._bytestream = bytestream
 
         @classmethod
-        def set_type_string_ids(cls, type_ids, string_ids):
-            """
-            Set type and string id arrays, are these are more ubiguitous in use in getting desciptors
-            """
-            cls._type_ids = type_ids
-            cls._string_ids = string_ids
-
-        @classmethod
         def get(cls, bytestream, count):
-            if hasattr(cls, "FORMAT"):
-                import struct
-                struct.iter_unpack()
-            return LazyList(cls, bytestream, count)
+            import struct
+            if cls.FORMAT[0] == '*':
+                # have variant-sized or un-type-able objects
+                return [cls(bytestream) for _ in range(count)]
+            else:
+                items = struct.iter_unpack("<" + cls.FORMAT, bytestream.read(
+                    count * struct.calcsize("<" + cls.FORMAT)))
+                return [cls(bytestream, item) for item in items]
 
     class Annotation(Item):
+        FORMAT = "ii"
 
-        def __init__(self, bytestream):
+        def __init__(self, bytestream, vals):
             super(DexParser.Annotation, self).__init__(bytestream)
-            self._index, \
-            self._annotations_offset = self._bytestream.read_ints(2)
+            self.index, \
+            self.annotations_offset = vals
 
     class AnnotationItem(Item):
+        FORMAT = "*b*"
 
         def __init__(self, bytestream):
             super(DexParser.AnnotationItem, self).__init__(bytestream)
-            self._visibility = bytestream.read_byte()
-            self._encoded_annotation = bytestream.parse_items(1, None, DexParser.EncodedAnnotation)[0]
+            self.visibility = bytestream.read_byte()
+            self.encoded_annotation = bytestream.parse_items(1, None, DexParser.EncodedAnnotation)[0]
 
     class AnnotationOffsetItem(Item):
+        FORMAT = "i"
 
-        def __init__(self, bytestream):
+        def __init__(self, bytestream, vals):
             super(DexParser.AnnotationOffsetItem, self).__init__(bytestream)
-            self._annotation_offset = bytestream.read_int()
+            self.annotation_offset = vals[0]
 
     class AnnotationSetItem(Item):
+        FORMAT = "*i*"
 
         def __init__(self, bytestream):
             super(DexParser.AnnotationSetItem, self).__init__(bytestream)
             size = bytestream.read_int()
-            self._entries = self._bytestream.parse_items(size, None, DexParser.AnnotationOffsetItem)
+            self.entries = self._bytestream.parse_items(size, None, DexParser.AnnotationOffsetItem)
 
         def __iter__(self):
-            for item in self._entries:
+            for item in self.entries:
                 yield item
 
     class AnnotationElement(Item):
+        FORAMT = "*i*"
 
         def __init__(self, bytestream):
             super(DexParser.AnnotationElement, self).__init__(bytestream)
-            self._name_index = bytestream.read_leb128()
-            self._value = bytestream.parse_items(1, None, DexParser.EncodedValue)[0]
+            self.name_index = bytestream.read_leb128()
+            self.value = bytestream.parse_items(1, None, DexParser.EncodedValue)[0]
 
     class AnnotationsDirectoryItem(Item):
+        FORMAT = "*i*"
 
         def __init__(self, bytestream):
             super(DexParser.AnnotationsDirectoryItem, self).__init__(bytestream)
-            self._class_annotations_offset, \
-            self._field_size, \
-            self._annotated_method_size, \
-            self._annotated_parameter_size = bytestream.read_ints(4)
-            self._field_annotations = DexParser.Annotation.get(bytestream, self._field_size)
-            self._method_annotations = DexParser.Annotation.get(bytestream, self._annotated_method_size)
-            self._parameter_annotations = DexParser.Annotation.get(bytestream, self._annotated_parameter_size)
+            self.class_annotations_offset, \
+            field_size, \
+            annotated_method_size, \
+            annotated_parameter_size = bytestream.read_ints(4)
+            self.field_annotations = DexParser.Annotation.get(bytestream, field_size)
+            self.method_annotations = DexParser.Annotation.get(bytestream, annotated_method_size)
+            self.parameter_annotations = DexParser.Annotation.get(bytestream, annotated_parameter_size)
 
-        def get_methods_with_annotation(self, descriptor, method_ids):
+        def get_methods_with_annotation(self, target_descriptor, method_ids):
             """
             :return: all vritual methods int his directory of that ar annotated with given descriptor
             """
             results = []
-            for annotation in self._method_annotations:
-                if annotation._annotations_offset == 0:
+            for annotation in self.method_annotations:
+                if annotation.annotations_offset == 0:
                     continue
-                for entries in self._bytestream.parse_items(1, annotation._annotations_offset, DexParser.AnnotationSetItem):
+                for entries in self._bytestream.parse_items(1, annotation.annotations_offset,
+                                                            DexParser.AnnotationSetItem):
                     for entry in entries:
-                        item = self._bytestream.parse_items(1, entry._annotation_offset, DexParser.AnnotationItem)[0]
-                        type_id = self._type_ids[item._encoded_annotation._type_index]
-                        string_id = self._string_ids[type_id._descriptor_index]
+                        item = self._bytestream.parse_items(1, entry.annotation_offset, DexParser.AnnotationItem)[0]
+                        type_id = self._type_ids[item.encoded_annotation.type_index]
+                        string_id = self._string_ids[type_id.descriptor_index]
                         my_descriptor = self._bytestream.parse_descriptor(string_id)
-                        if descriptor == my_descriptor:
-                            method_id = method_ids[annotation._index]
-                            descriptor = self._bytestream.parse_method_name(method_id)
-                            results.append(DexParser._reformat(descriptor))
+                        if target_descriptor == my_descriptor:
+                            method_id = method_ids[annotation.index]
+                            method_descriptor = self._bytestream.parse_method_name(method_id)
+                            results.append(method_descriptor)
                             break
             return set(results)
 
     class ClassDefItem(Item):
+        FORMAT = "iiiiiiii"
 
-        def __init__(self, bytestream):
+        def __init__(self, bytestream, ints):
             super(DexParser.ClassDefItem, self).__init__(bytestream)
-            self._class_index, \
-            self._access_flags, \
-            self._super_class_index, \
-            self._interfaces_offset, \
-            self._source_file_index, \
-            self._annotations_offset, \
-            self._class_data_offset, \
-            self._static_values_offset = bytestream.read_ints(8)
+            self.class_index, \
+            self.access_flags, \
+            self.super_class_index, \
+            self.interfaces_offset, \
+            self.source_file_index, \
+            self.annotations_offset, \
+            self.class_data_offset, \
+            self.static_values_offset = ints
             self._super_type = None
             self._descriptor = None
             self._super_descriptor = None
-            self._type_index = self._class_index
+            self._type_index = self.class_index
 
         @property
         def descriptor(self):
             if not self._descriptor:
-                type_id = self._type_ids[self._class_index]
-                string_id = self._string_ids[type_id._descriptor_index]
+                type_id = self._type_ids[self.class_index]
+                string_id = self._string_ids[type_id.descriptor_index]
                 self._descriptor = self._bytestream.parse_descriptor(string_id)
             return self._descriptor
 
-        #@lru_cache(maxsize=MAX_SIZE)
+        # @lru_cache(maxsize=MAX_SIZE)
         def super_descriptor(self):
             """
             :return: the string descriptor (cached) of the super class of this class def
             """
             if not self._super_descriptor:
-                desc_index = self.super_type()._descriptor_index
+                desc_index = self.super_type().descriptor_index
                 string_id = self._string_ids[desc_index]
                 self._super_descrptor = self._bytestream.parse_descriptor(string_id)
             return self._super_descrptor
 
-        #@lru_cache(maxsize=MAX_SIZE)
+        # @lru_cache(maxsize=MAX_SIZE)
         def super_type(self):
             """
             :return: type TypeIdItem of the super class or None if no inheritance
             """
-            if self._super_class_index < 0:
+            if self.super_class_index < 0:
                 return None
-            return self._type_ids[self._super_class_index]
+            return self._type_ids[self.super_class_index]
 
         def has_direct_super_class(self, descriptors):
             """
             :return: whether this class inherits from one of the classes defined by the given descriptors
             """
-            if self._super_class_index < 0:
+            if self.super_class_index < 0:
                 return False
             desc = self.super_descriptor()
             return desc in descriptors
 
     class ClassDefData(Item):
+        FORMAT="*"
+
         def __init__(self, bytestream):
             super(DexParser.ClassDefData, self).__init__(bytestream)
-            self._static_fields_size = bytestream.read_leb128()
-            self._instance_fields_size = bytestream.read_leb128()
-            self._direct_methods_size = bytestream.read_leb128()
-            self._virtual_methods_size = bytestream.read_leb128()
-            self._static_fields = bytestream.parse_items(self._static_fields_size, None, DexParser.EncodedField)
-            self._instance_fields = bytestream.parse_items(self._instance_fields_size, None, DexParser.EncodedField)
-            self._direct_methods = bytestream.parse_items(self._direct_methods_size, None, DexParser.EncodedMethod)
-            self._virtual_methods = bytestream.parse_items(self._virtual_methods_size, None, DexParser.EncodedMethod)
+            static_fields_size = bytestream.read_leb128()
+            instance_fields_size = bytestream.read_leb128()
+            direct_methods_size = bytestream.read_leb128()
+            virtual_methods_size = bytestream.read_leb128()
+            self.static_fields = bytestream.parse_items(static_fields_size, None, DexParser.EncodedField)
+            self.instance_fields = bytestream.parse_items(instance_fields_size, None, DexParser.EncodedField)
+            self.direct_methods = bytestream.parse_items(direct_methods_size, None, DexParser.EncodedMethod)
+            self.virtual_methods = bytestream.parse_items(virtual_methods_size, None, DexParser.EncodedMethod)
 
     class EncodedAnnotation(Item):
+        FORMAT="*i*"
+
         def __init__(self, bytestream):
             super(DexParser.EncodedAnnotation, self).__init__(bytestream)
-            self._type_index = bytestream.read_leb128()
-            self._size = bytestream.read_leb128()
-            self._elements = bytestream.parse_items(self._size, None, DexParser.AnnotationElement)
+            self.type_index = bytestream.read_leb128()
+            size = bytestream.read_leb128()
+            self.elements = bytestream.parse_items(size, None, DexParser.AnnotationElement)
 
     class EncodedItem(Item):
+        FORMAT="*"
 
         def __init__(self, bytestream):
             super(DexParser.EncodedItem, self).__init__(bytestream)
-            self._index_diff = bytestream.read_leb128()
-            self._access_flags = bytestream.read_leb128()
-
+            self.index_diff = bytestream.read_leb128()
+            self.access_flags = bytestream.read_leb128()
 
     EncodedField = EncodedItem
 
     class EncodedMethod(EncodedItem):
+        FORMAT="*"
 
         def __init__(self, bytestream):
             super(DexParser.EncodedMethod, self).__init__(bytestream)
-            self._code_offset = bytestream.read_leb128()
+            self.code_offset = bytestream.read_leb128()
 
         def method_name(self, method_ids):
-            method_id = method_ids[self._index_diff]
+            method_id = method_ids[self.index_diff]
             return self._bytestream.parse_method_name(method_id)
 
     class EncodedArray(Item):
+        FORMAT="*"
 
         def __init__(self, bytestream):
             super(DexParser.EncodedArray, self).__init__(bytestream)
-            self._size = bytestream.read_leb128()
-            self._value = bytestream.parse_items(self._size, None, DexParser.EncodedValue)
+            self.size = bytestream.read_leb128()
+            self.value = bytestream.parse_items(self.size, None, DexParser.EncodedValue)
 
     class EncodedValue(Item):
+        FORMAT = "*"
 
         VALUE_BYTE = 0x00
         VALUE_SHORT = 0x02
@@ -343,41 +333,45 @@ class DexParser(object):
                 self._value = bytestream.read_bytes(value_arg)
 
     class FieldIdItem(Item):
+        FORMAT = "ssi"
 
-        def __init__(self, bytestream):
+        def __init__(self, bytestream, vals):
             super(DexParser.FieldIdItem, self).__init__(bytestream)
-            self._class_index = bytestream.read_short()
-            self._type_index = bytestream.read_short()
-            self._name_index = bytestream.read_int()
+            self.class_index, \
+            self.type_index, \
+            self.name_index = vals
 
     class MethodIdItem(Item):
+        FORMAT = "hhi"
 
-        def __init__(self, bytestream):
+        def __init__(self, bytestream, vals):
             super(DexParser.MethodIdItem, self).__init__(bytestream)
-            self._class_index = bytestream.read_short()
-            self._proto_index = bytestream.read_short()
-            self._name_index = bytestream.read_int()
+            self.class_index, \
+            self.proto_index, \
+            self.name_index = vals
 
     class ProtoIdItem(Item):
+        FORMAT = "iii"
 
-        def __init__(self, bytestream):
+        def __init__(self, bytestream, ints):
             super(DexParser.ProtoIdItem, self).__init__(bytestream)
-            self._shorty_index = bytestream.read_int()
-            self._return_type_index, \
-            self._parameters_offset = bytestream.read_ints(2)
+            self.shorty_index, \
+            self.return_type_index, \
+            self.parameters_offset = ints
 
     class StringIdItem(Item):
         FORMAT = "i"
 
-        def __init__(self, bytestream):
+        def __init__(self, bytestream, offset):
             super(DexParser.StringIdItem, self).__init__(bytestream)
-            self._data_offset = self._bytestream.read_int()
+            self.data_offset = offset[0]
 
     class TypeIdItem(Item):
+        FORMAT = "i"
 
-        def __init__(self, bytestream):
+        def __init__(self, bytestream, index):
             super(DexParser.TypeIdItem, self).__init__(bytestream)
-            self._descriptor_index = bytestream.read_int()
+            self.descriptor_index = index[0]
 
     #
     #####################
@@ -399,6 +393,7 @@ class DexParser(object):
                 parser = DexParser(path)
                 tests += list(parser.find_junit3_tests()) + list(parser.find_junit4_tests())
         shutil.rmtree(tempd)
+        return tests
 
     def __init__(self, file_name):
         self._bytestream = ByteStream(file_name)
@@ -421,9 +416,9 @@ class DexParser(object):
         matching_classes = []
         fixed_set = set(descriptors)
         for clazz in [c for c in self._ids[DexParser.ClassDefItem] if c.has_direct_super_class(fixed_set)]:
-            type_id = self._ids[DexParser.TypeIdItem][clazz._class_index]
+            type_id = self._ids[DexParser.TypeIdItem][clazz.class_index]
             matching_classes.append(clazz)
-            string_id = self._ids[DexParser.StringIdItem][type_id._descriptor_index]
+            string_id = self._ids[DexParser.StringIdItem][type_id.descriptor_index]
             descriptors.append(self._bytestream.parse_descriptor(string_id))
         return matching_classes
 
@@ -431,15 +426,15 @@ class DexParser(object):
         """
         :return: all method names for a given class def
         """
-        class_data = self._bytestream.parse_items(1, class_def._class_data_offset, DexParser.ClassDefData)[0]
-        return [m.method_name(self._ids[DexParser.MethodIdItem]) for m in class_data._virtual_methods]
+        class_data = self._bytestream.parse_items(1, class_def.class_data_offset, DexParser.ClassDefData)[0]
+        return [m.method_name(self._ids[DexParser.MethodIdItem]) for m in class_data.virtual_methods]
 
     @staticmethod
-    def _reformat(name):
+    def _descriptor2name(name):
         """
         :return: the name reformatted into the format expected for parameter-passing to an adb am isntrument command
         """
-        items = name.rsplit('.', 1)
+        items = name[1:-1].replace('/', '.').rsplit('.', 1)
         return "#".join(items)
 
     def find_junit3_tests(self, descriptors=list(junit3.Junit3Processor.DEFAULT_DESCRIPTORS)):
@@ -447,22 +442,21 @@ class DexParser(object):
         method_names = []
 
         for class_def in test_classes:
-            method_names += [self._reformat(m) for m in self.find_method_names(class_def) if m.startswith("test")]
+            method_names += [m for m in self.find_method_names(class_def) if m.startswith("test")]
 
         return set(method_names)
 
     def find_junit4_tests(self):
-        test_annotation_descriptor = "L/org/junit/Test;"
+        test_annotation_descriptor = "Lorg/junit/Test;"
         result = []
-        for cdef in [cdef for cdef in self._ids[DexParser.ClassDefItem] if cdef._annotations_offset != 0]:
-            if "linkedin" not in cdef.descriptor or cdef.descriptor.startswith('Landroid') or cdef.descriptor.startswith('Ljava'):
-                continue
-            print cdef.descriptor
+        for cdef in [cdef for cdef in self._ids[DexParser.ClassDefItem] if cdef.annotations_offset != 0]:
+
             directory = self._bytestream.parse_items(1,
-                                                     cdef._annotations_offset,
+                                                     cdef.annotations_offset,
                                                      DexParser.AnnotationsDirectoryItem)[0]
-            result += [self._reformat(name) for name in directory.get_methods_with_annotation(test_annotation_descriptor,
-                                                                                              self._ids[DexParser.MethodIdItem])]
+            result += [self._descriptor2name(cdef.descriptor) + "#" + name for name in
+                       directory.get_methods_with_annotation(test_annotation_descriptor,
+                                                             self._ids[DexParser.MethodIdItem])]
         return set(result)
 
 
@@ -471,4 +465,5 @@ def main():
         print("Usage: dexdump <apk-file-name>")
         sys.exit(-1)
     tests = DexParser.parse(sys.argv[1])
-    print ("FOUND:\n%s" % tests)
+    for test in tests:
+        print(test)

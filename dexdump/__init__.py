@@ -31,7 +31,10 @@ class ByteStream(object):
         return False
 
     def read_byte(self):
-        return ord(self._file.read(1)[0])
+        if sys.version_info >= (3,):
+            return self._file.read(1)[0]
+        else:
+            return ord(self._file.read(1)[0])
 
     def read_short(self):
         return struct.unpack(ByteStream.LITTLE_ENDIAN_SHORT_FORMAT, self._file.read(2))[0]
@@ -47,12 +50,15 @@ class ByteStream(object):
 
     def read_leb128(self):
         result = 0
-        count = 0
+        shift = 0
         while True:
             current = self.read_byte()
-            result |= ((current & 0x7f) << count*7)
-            if (current & 0x80) != 0x80 or count >= 5:
+            result |= ((current & 0x7f) << shift)
+            if (current & 0x80) == 0:
                 break
+            shift += 7
+            if shift >= 35:
+                raise Exception("LEB128 sequence invalid")
         return result
 
     def read_bytes(self, byte_count):
@@ -81,6 +87,9 @@ class ByteStream(object):
     def seek(self, pos):
         return self._file.seek(pos)
 
+    def read(self, count):
+        return self._file.read(count)
+
     def parse_items(self, count, offset, clazz):
         if count == 0:
             return []
@@ -91,13 +100,13 @@ class ByteStream(object):
         return clazz.get(self, count)
 
     def parse_descriptor(self, string_id):
-        self._file.seek(string_id._data_offset)
+        self._file.seek(string_id.data_offset)
         # read past unused:
         self.read_leb128()
         return self.read_string()
 
     def parse_method_name(self, method_id):
-        string_id = method_id._string_ids[method_id._name_index]
-        self._file.seek(string_id._data_offset)
+        string_id = method_id._string_ids[method_id.name_index]
+        self._file.seek(string_id.data_offset)
         self.read_leb128()  # read unused data
         return self.read_string()
