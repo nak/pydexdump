@@ -94,6 +94,11 @@ class ByteStream(object):
             self._file.seek(offset)
         return clazz.get(self, count)
 
+    def parse_one_item(self, offset, clazz):
+        if offset is not None:
+            self._file.seek(offset)
+        return clazz.get(self, 1)[0]
+
     def parse_descriptor(self, string_id):
         self._file.seek(string_id.data_offset)
         # read past unused:

@@ -106,8 +106,7 @@ class DexParser(object):
 
         def __init__(self, bytestream, vals):
             super(DexParser.Annotation, self).__init__(bytestream)
-            self.index, \
-            self.annotations_offset = vals
+            self.index, self.annotations_offset = vals
 
     class AnnotationItem(Item):
         FORMAT = "*b*"
@@ -115,7 +114,7 @@ class DexParser(object):
         def __init__(self, bytestream):
             super(DexParser.AnnotationItem, self).__init__(bytestream)
             self.visibility = bytestream.read_byte()
-            self.encoded_annotation = bytestream.parse_items(1, None, DexParser.EncodedAnnotation)[0]
+            self.encoded_annotation = bytestream.parse_one_item(None, DexParser.EncodedAnnotation)
 
     class AnnotationOffsetItem(Item):
         FORMAT = "i"
@@ -137,12 +136,12 @@ class DexParser(object):
                 yield item
 
     class AnnotationElement(Item):
-        FORAMT = "*i*"
+        FORMAT = "*i*"
 
         def __init__(self, bytestream):
             super(DexParser.AnnotationElement, self).__init__(bytestream)
             self.name_index = bytestream.read_leb128()
-            self.value = bytestream.parse_items(1, None, DexParser.EncodedValue)[0]
+            self.value = bytestream.parse_one_item(None, DexParser.EncodedValue)
 
     class AnnotationsDirectoryItem(Item):
         FORMAT = "*i*"
@@ -167,18 +166,17 @@ class DexParser(object):
             for annotation in self.method_annotations:
                 if annotation.annotations_offset == 0:
                     continue
-                for entries in self._bytestream.parse_items(1, annotation.annotations_offset,
-                                                            DexParser.AnnotationSetItem):
-                    for entry in entries:
-                        item = self._bytestream.parse_items(1, entry.annotation_offset, DexParser.AnnotationItem)[0]
-                        type_id = self._type_ids[item.encoded_annotation.type_index]
-                        string_id = self._string_ids[type_id.descriptor_index]
-                        my_descriptor = self._bytestream.parse_descriptor(string_id)
-                        if target_descriptor == my_descriptor:
-                            method_id = method_ids[annotation.index]
-                            method_descriptor = self._bytestream.parse_method_name(method_id)
-                            results.append(method_descriptor)
-                            break
+                entries = self._bytestream.parse_one_item(annotation.annotations_offset, DexParser.AnnotationSetItem)
+                for entry in entries:
+                    item = self._bytestream.parse_one_item(entry.annotation_offset, DexParser.AnnotationItem)
+                    type_id = self._type_ids[item.encoded_annotation.type_index]
+                    string_id = self._string_ids[type_id.descriptor_index]
+                    my_descriptor = self._bytestream.parse_descriptor(string_id)
+                    if target_descriptor == my_descriptor:
+                        method_id = method_ids[annotation.index]
+                        method_descriptor = self._bytestream.parse_method_name(method_id)
+                        results.append(method_descriptor)
+                        break
             return set(results)
 
     class ClassDefItem(Item):
@@ -312,9 +310,10 @@ class DexParser(object):
             if value_type <= DexParser.EncodedValue.VALUE_ENUM:
                 self._value = bytestream.read_bytes(value_arg + 1)
             elif value_type == DexParser.EncodedValue.VALUE_ARRAY:
-                self._value = bytestream.parse_items(None, None, DexParser.EncodedArray)
+                size = self._bytestream.read(1)[0]
+                self._value = bytestream.parse_items(size, None, DexParser.EncodedArray)
             elif value_type == DexParser.EncodedValue.VALUE_ANNOTATION:
-                self._value = bytestream.parse_items(1, None, DexParser.EncodedAnnotation)
+                self._value = bytestream.parse_one_item(None, DexParser.EncodedAnnotation)
             elif value_type == DexParser.EncodedValue.VALUE_NULL:
                 self._value = bytes([])
             elif value_type == DexParser.EncodedValue.VALUE_BOOLEAN:
@@ -415,7 +414,7 @@ class DexParser(object):
         :param class_def: `DexParser.ClassDefItem` from which to find names
         :return: all method names for a given class def
         """
-        class_data = self._bytestream.parse_items(1, class_def.class_data_offset, DexParser.ClassDefData)[0]
+        class_data = self._bytestream.parse_one_item(class_def.class_data_offset, DexParser.ClassDefData)
         return [m.method_name(self._ids[DexParser.MethodIdItem]) for m in class_data.virtual_methods]
 
     @staticmethod
@@ -440,12 +439,12 @@ class DexParser(object):
         result = []
         for class_def in [c for c in self._ids[DexParser.ClassDefItem] if c.annotations_offset != 0]:
 
-            directory = self._bytestream.parse_items(1,
-                                                     class_def.annotations_offset,
-                                                     DexParser.AnnotationsDirectoryItem)[0]
-            result += [self._descriptor2name(class_def.descriptor) + "#" + name for name in
-                       directory.get_methods_with_annotation(test_annotation_descriptor,
-                                                             self._ids[DexParser.MethodIdItem])]
+            directory = self._bytestream.parse_one_item(class_def.annotations_offset,
+                                                        DexParser.AnnotationsDirectoryItem)
+            names = directory.get_methods_with_annotation(test_annotation_descriptor,
+                                                          self._ids[DexParser.MethodIdItem])
+            result += [self._descriptor2name(class_def.descriptor) + "#" + name for name in names]
+
         return set(result)
 
 
